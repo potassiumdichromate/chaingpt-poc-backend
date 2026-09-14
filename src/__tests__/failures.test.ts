@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { ProviderError, categorize, isRetryable } from '../lib/errors.js';
+import { asyncRoute } from '../routes/helpers.js';
+import { initStore } from '../db/store.js';
 import { TtlCache, withRetry, withTimeout } from '../lib/resilience.js';
 import { parseWithRepair } from '../intelligence/parser.js';
 import { opportunitySetSchema } from '../intelligence/schemas.js';
@@ -226,5 +229,68 @@ describe('SDK error classification (status hidden in the message)', () => {
   it('keeps insufficient_credits ahead of any status parsing', () => {
     const e = categorize({ message: 'Request failed with status code 400: Insufficient credits' });
     expect(e.category).toBe('insufficient_credits');
+  });
+});
+
+describe('asyncRoute body validation', () => {
+  /**
+   * Regression: asyncRoute catches every throw, so a ZodError from `.parse()`
+   * used to reach sendIntelligenceError and come back as 502 "Intelligence is
+   * temporarily unavailable" with retryable:true - telling the client to retry
+   * a malformed request forever. The ZodError -> 400 handler in index.ts is
+   * unreachable for these routes because asyncRoute answers instead of
+   * delegating to next(err).
+   */
+  const stubRes = () => {
+    const res: any = { headersSent: false, statusCode: 0, body: undefined };
+    res.status = (code: number) => { res.statusCode = code; return res; };
+    res.json = (payload: unknown) => { res.body = payload; res.headersSent = true; return res; };
+    return res;
+  };
+
+  const bodySchema = z.object({ opportunityId: z.string() });
+
+  // sendIntelligenceError writes an analytics event, so the store must be live
+  // before any test here reaches it - otherwise the first failed write rejects
+  // the shared persist() queue and every later write inherits that rejection.
+  beforeEach(async () => { await initStore(); });
+
+  it('answers 400 with the offending issues when the body fails validation', async () => {
+    const handler = asyncRoute(async (req: any) => { bodySchema.parse(req.body); }, 'test_route');
+    const res = stubRes();
+    await handler({ body: { opportunityId: 123 }, params: {} }, res);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error.message).toBe('Invalid request body');
+    expect(res.body.error.issues[0].path).toEqual(['opportunityId']);
+  });
+
+  it('does not label a validation failure as a retryable provider outage', async () => {
+    const handler = asyncRoute(async (req: any) => { bodySchema.parse(req.body); }, 'test_route');
+    const res = stubRes();
+    await handler({ body: {}, params: {} }, res);
+
+    expect(res.statusCode).not.toBe(502);
+    expect(res.body.error.retryable).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain('temporarily unavailable');
+  });
+
+  it('still funnels a genuine provider failure to 502', async () => {
+    const handler = asyncRoute(async () => { throw new ProviderError('upstream_5xx', 'boom'); }, 'test_route');
+    const res = stubRes();
+    await handler({ body: {}, params: {} }, res);
+
+    expect(res.statusCode).toBe(502);
+    expect(res.body.error.retryable).toBe(true);
+  });
+
+  it('leaves an already-sent response untouched', async () => {
+    const handler = asyncRoute(async () => { throw new Error('late'); }, 'test_route');
+    const res = stubRes();
+    res.headersSent = true;
+    await handler({ body: {}, params: {} }, res);
+
+    expect(res.statusCode).toBe(0);
+    expect(res.body).toBeUndefined();
   });
 });

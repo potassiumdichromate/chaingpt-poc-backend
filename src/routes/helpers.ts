@@ -1,4 +1,5 @@
 import type { Response } from 'express';
+import { ZodError } from 'zod';
 import { categorize } from '../lib/errors.js';
 import { log } from '../lib/logger.js';
 import { track } from '../analytics.js';
@@ -42,13 +43,23 @@ export function asyncRoute(
     try {
       await fn(req, res);
     } catch (err) {
-      if (!res.headersSent) {
-        await sendIntelligenceError(res, err, {
-          agentId: req.params?.agentId,
-          projectId: req.params?.projectId,
-          label,
-        });
+      if (res.headersSent) return;
+
+      // A bad body is the caller's fault, not a provider outage. Without this the
+      // intelligence funnel below answers 502 "temporarily unavailable" with
+      // retryable:true, so the client retries a request that can never succeed
+      // and the offending field is visible only in our logs.
+      if (err instanceof ZodError) {
+        log.debug('invalid_request_body', { label, issues: err.issues.length });
+        res.status(400).json({ error: { message: 'Invalid request body', issues: err.issues } });
+        return;
       }
+
+      await sendIntelligenceError(res, err, {
+        agentId: req.params?.agentId,
+        projectId: req.params?.projectId,
+        label,
+      });
     }
   };
 }
