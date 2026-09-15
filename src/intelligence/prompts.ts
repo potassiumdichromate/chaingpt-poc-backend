@@ -301,8 +301,17 @@ The previous response could not be parsed. Reason: ${reason}
 Rewrite the content below as ONE valid JSON object matching this exact shape:
 ${shape}
 
-Return only the JSON object. No fences, no commentary. Preserve the original meaning;
-do not invent new facts.
+Return only the JSON object. No fences, no commentary.
+
+RULES:
+- Every string field must be filled from the previous response. An empty string is
+  NOT acceptable output - the shape above shows structure, not values to copy.
+- Reorganising prose into the right field is NOT inventing. If the response explains
+  why something matters, that belongs in "why" even when it was never labelled.
+- Numeric fields must carry a real judgement, not the 0 shown in the shape.
+  "relevance" is an integer on a 0-100 scale, so a strong fit is 80-95, NOT 8 or 9.
+- Only if the response genuinely says nothing about a field may it stay empty.
+- Do not add facts the response does not support.
 
 PREVIOUS RESPONSE:
 ${badText.slice(0, 6000)}`;

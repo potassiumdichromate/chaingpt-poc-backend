@@ -16,6 +16,9 @@ import { buildAgentSignalQuery, buildProjectSignalQuery } from './signals.js';
 import { categorize } from '../lib/errors.js';
 import type { Agent, CreatorProject, DeepResearch, GrowthPlan, Opportunity, Signal } from '../types.js';
 
+/** Shown instead of a fabricated source when AI News returned nothing. */
+const NO_SIGNAL_NOTE = 'No current news signal - derived from your KULT profile.';
+
 const OPP_SHAPE = '{"opportunities":[{"title":"","relevance":0,"signal":"","why":"","opportunity":"","action":"","memoryInfluence":{"used":false,"knowledgeIds":[],"reason":""},"liveEvidence":{"used":false,"summary":"","evidenceTypes":[]}}]}';
 const RESEARCH_SHAPE = '{"summary":"","whyNow":"","fitForAgent":"","liveEvidence":{"summary":"","items":[],"confidenceNote":""},"recommendedActions":[""],"targets":[""],"growthAngle":"","risks":[""]}';
 const GROWTH_SHAPE = '{"opportunities":[{"title":"","relevance":0,"why":"","targets":[""],"growthAngle":"","action":""}],"campaignBrief":{"positioning":"","firstAction":""}}';
@@ -137,7 +140,9 @@ export async function generateOpportunities(
       id: newId('opp'),
       title: o.title,
       relevance: Math.round(o.relevance),
-      signal: o.signal,
+      // Spec 15.4: when there was no external signal, say so plainly rather than
+      // leaving a blank field the UI would render as a missing source.
+      signal: o.signal?.trim() || NO_SIGNAL_NOTE,
       why: o.why,
       opportunity: o.opportunity,
       action: o.action,

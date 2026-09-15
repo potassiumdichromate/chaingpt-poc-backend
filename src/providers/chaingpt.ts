@@ -53,15 +53,42 @@ export class ChainGPTProvider implements IntelligenceProvider {
     // query can legitimately return zero rows. Walk to broader phrases rather
     // than handing the reasoning step an empty signal set.
     const attempts = [query.searchQuery, ...(query.fallbackQueries ?? [])].filter(Boolean);
-    let signals: Signal[] = [];
+    let signals = await this.walkQueries(query, attempts, query.fetchAfter);
 
+    // VERIFIED LIVE: the searchable corpus can lag the unfiltered feed by weeks,
+    // so every phrase above returns zero purely because of the freshness cutoff
+    // while the same phrases return rows without it. Older signals carry their
+    // own publishedAt into the prompt, so the model can judge staleness itself -
+    // that beats reasoning with no external evidence at all.
+    if (signals.length === 0 && query.fetchAfter) {
+      signals = await this.walkQueries(query, attempts, undefined);
+      if (signals.length > 0) {
+        log.info('signal_freshness_relaxed', {
+          requested: query.searchQuery,
+          cutoff: query.fetchAfter.toISOString(),
+          count: signals.length,
+        });
+      }
+    }
+
+    this.signalCache.set(key, signals);
+    return signals;
+  }
+
+  /** Tries each phrase in order under one freshness cutoff, stopping at the first hit. */
+  private async walkQueries(
+    query: SignalQuery,
+    attempts: string[],
+    fetchAfter: Date | undefined,
+  ): Promise<Signal[]> {
     for (const searchQuery of attempts) {
-      signals = await withRetry(
+      const attempt = { ...query, searchQuery, fetchAfter };
+      const signals = await withRetry(
         () =>
           withTimeout(
             config.chaingpt.transport === 'sdk'
-              ? this.getSignalsSdk({ ...query, searchQuery })
-              : this.getSignalsRest({ ...query, searchQuery }),
+              ? this.getSignalsSdk(attempt)
+              : this.getSignalsRest(attempt),
             config.timeouts.news,
             'chaingpt.news',
           ),
@@ -71,13 +98,11 @@ export class ChainGPTProvider implements IntelligenceProvider {
         if (searchQuery !== query.searchQuery) {
           log.info('signal_query_fallback', { requested: query.searchQuery, used: searchQuery, count: signals.length });
         }
-        break;
+        return signals;
       }
-      log.debug('signal_query_empty', { searchQuery });
+      log.debug('signal_query_empty', { searchQuery, fetchAfter: fetchAfter?.toISOString() });
     }
-
-    this.signalCache.set(key, signals);
-    return signals;
+    return [];
   }
 
   private async getSignalsSdk(query: SignalQuery): Promise<Signal[]> {

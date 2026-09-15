@@ -24,7 +24,14 @@ const liveEvidenceSummarySchema = z
 export const opportunitySchema = z.object({
   title: z.string().min(3),
   relevance: z.coerce.number().min(0).max(100),
-  signal: z.string().min(3),
+  /**
+   * Deliberately NOT min(3): the engine proceeds on KULT context alone when AI
+   * News returns nothing (engine.ts "signals_unavailable_continuing"), and a
+   * model with no signals to cite correctly returns "". Requiring a non-empty
+   * string here turned that supported path into a 502. The engine substitutes an
+   * explicit "no signal" line so the absence is stated, never invented.
+   */
+  signal: z.string().default(''),
   why: z.string().min(3),
   opportunity: z.string().min(3),
   action: z.string().min(3),

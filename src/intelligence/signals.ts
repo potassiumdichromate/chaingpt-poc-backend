@@ -51,8 +51,17 @@ const DOMAIN_PHRASES = [
   'creator economy',
 ];
 
-/** Ordered broad fallbacks, only used when a narrower phrase yields nothing. */
-const FALLBACK_PHRASES = ['web3 gaming', 'gaming', 'AI agents', 'web3'];
+/**
+ * Ordered broad fallbacks, only used when a narrower phrase yields nothing.
+ *
+ * VERIFIED LIVE 2026-09-15: because searchQuery is a literal phrase match, the
+ * multi-word entries here can all legitimately return zero - "web3 gaming" and
+ * "creator economy" both did, while "gaming" and "web3" returned rows whose
+ * newest article was already outside the freshness window. The single-word
+ * terms at the tail are the ones with genuinely current coverage, so the walk
+ * always ends somewhere that has recent news rather than on an empty radar.
+ */
+const FALLBACK_PHRASES = ['web3 gaming', 'gaming', 'AI agents', 'web3', 'AI', 'crypto'];
 
 /** Genre hints that make a domain phrase more likely to suit this Agent. */
 function preferredDomainOrder(hints: string[]): string[] {

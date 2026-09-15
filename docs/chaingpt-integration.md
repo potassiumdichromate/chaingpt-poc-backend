@@ -150,7 +150,7 @@ the flag without one):
 ```ts
 {
   companyName: 'KULT',
-  companyDescription: 'KULT is a Web3 creator platform… KULT is a platform, not a token or cryptocurrency.',
+  companyDescription: 'KULT is a Web3 creator platform for building playable browser games and interactive experiences. Creators use KULT to design, publish, and monetize their games within the KULT ecosystem. The platform supports a diverse range of genres, including action, arcade, strategy, and RPGs. KULT emphasizes player engagement, community building, and creator empowerment. With KULT, developers can seamlessly integrate NFTs, tokens, and other blockchain mechanics into their games, enabling new models of ownership and monetization for players. The platform provides tools for creators to grow their audience, foster communities, and build sustainable careers in Web3 game development. KULT is a platform.',
   purpose: 'Give persistent KULT Agents real-time Web3 awareness and turn it into personalized actions.',
   aiTone: AI_TONE.PRE_SET_TONE,
   selectedTone: PRE_SET_TONES.PROFESSIONAL,

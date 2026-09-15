@@ -294,3 +294,75 @@ describe('asyncRoute body validation', () => {
     expect(res.body).toBeUndefined();
   });
 });
+
+describe('opportunity schema with no signals', () => {
+  /**
+   * Regression: engine.ts deliberately reasons on KULT context alone when AI
+   * News returns nothing, but the schema used to require signal.min(3). A model
+   * with nothing to cite returns "", so that supported path 502'd as
+   * malformed_output on a provider call that had actually succeeded.
+   */
+  const one = (over: Record<string, unknown> = {}) => ({
+    opportunities: [{
+      title: 'Partner with an AI gaming studio',
+      relevance: 80,
+      signal: '',
+      why: 'Fits the creator profile',
+      opportunity: 'Co-marketing slot',
+      action: 'Draft an intro message',
+      ...over,
+    }],
+  });
+
+  it('accepts an empty signal instead of rejecting the whole set', () => {
+    const r = opportunitySetSchema.safeParse(one());
+    expect(r.success).toBe(true);
+    expect(r.success && r.data.opportunities[0]!.signal).toBe('');
+  });
+
+  it('defaults a missing signal field rather than failing validation', () => {
+    const body = one();
+    delete (body.opportunities[0] as Record<string, unknown>).signal;
+    const r = opportunitySetSchema.safeParse(body);
+    expect(r.success).toBe(true);
+    expect(r.success && r.data.opportunities[0]!.signal).toBe('');
+  });
+
+  it('still enforces the fields that carry the actual recommendation', () => {
+    expect(opportunitySetSchema.safeParse(one({ why: '' })).success).toBe(false);
+    expect(opportunitySetSchema.safeParse(one({ action: '' })).success).toBe(false);
+    expect(opportunitySetSchema.safeParse(one({ title: '' })).success).toBe(false);
+  });
+});
+
+describe('store write queue', () => {
+  /**
+   * Regression: persist() assigned the rejected promise back to writeQueue, so
+   * one failed write left every later write chaining off a rejected promise -
+   * never attempted, each logging the original error, while the API kept
+   * answering 201. Spec 15.4 forbids claiming a save that did not happen.
+   */
+  it('recovers after a failed write instead of rejecting every later one', async () => {
+    let queue: Promise<void> = Promise.resolve();
+    let shouldFail = true;
+    const attempts: number[] = [];
+
+    // Mirrors persist(): sequential, caller sees the real failure, queue settles.
+    const persistLike = (): Promise<void> => {
+      const attempt = queue.then(async () => {
+        attempts.push(1);
+        if (shouldFail) throw new Error('disk full');
+      });
+      queue = attempt.catch(() => {});
+      return attempt;
+    };
+
+    await expect(persistLike()).rejects.toThrow('disk full');
+    shouldFail = false;
+    await expect(persistLike()).resolves.toBeUndefined();
+    await expect(persistLike()).resolves.toBeUndefined();
+
+    // Every call must actually run; the old code skipped 2 and 3 entirely.
+    expect(attempts.length).toBe(3);
+  });
+});

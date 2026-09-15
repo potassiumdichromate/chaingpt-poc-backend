@@ -64,7 +64,7 @@ export async function initStore(): Promise<void> {
 }
 
 function persist(): Promise<void> {
-  writeQueue = writeQueue.then(async () => {
+  const attempt = writeQueue.then(async () => {
     if (driver === 'mongo') {
       const db = await connectMongo();
       await db.collection(COLLECTIONS.state).replaceOne(
@@ -82,7 +82,16 @@ function persist(): Promise<void> {
     log.error('store_write_failed', { driver, error: (err as Error).message });
     throw err;
   });
-  return writeQueue;
+
+  // The queue orders writes, so the next persist() chains off this one - but it
+  // must chain off a SETTLED promise, not a rejected one. Assigning `attempt`
+  // directly meant one transient failure rejected every later write without it
+  // ever being attempted, each logging the original error, while callers kept
+  // getting 201s. Swallow the rejection for the queue only; `attempt` still
+  // carries the real failure to this caller (spec 15.4: never claim a save that
+  // did not happen).
+  writeQueue = attempt.catch(() => {});
+  return attempt;
 }
 
 export const db = {
