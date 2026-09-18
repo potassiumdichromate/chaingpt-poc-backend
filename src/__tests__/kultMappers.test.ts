@@ -267,22 +267,3 @@ describe('creatorDisplayName', () => {
     expect(creatorDisplayName('did:privy:cmnditqy301kl0cjrbm20d737')).toBe('privy:cmnditqy…');
   });
 });
-
-// ChainGPT rejects a readable thread id: "sdkUniqueId must be a UUID".
-describe('threadUuid', () => {
-  it('produces a valid v5-shaped UUID', async () => {
-    const { threadUuid } = await import('../intelligence/engine.js');
-    expect(threadUuid('kult:a:research:o'))
-      .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  });
-
-  it('is stable for the same key, so a research thread stays continuous', async () => {
-    const { threadUuid } = await import('../intelligence/engine.js');
-    expect(threadUuid('kult:a:research:o')).toBe(threadUuid('kult:a:research:o'));
-  });
-
-  it('differs per opportunity, so threads do not leak into each other', async () => {
-    const { threadUuid } = await import('../intelligence/engine.js');
-    expect(threadUuid('kult:a:research:o1')).not.toBe(threadUuid('kult:a:research:o2'));
-  });
-});

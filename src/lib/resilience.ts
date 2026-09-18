@@ -24,9 +24,24 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Spec 17: one retry with backoff for transient 429 / 5xx / timeout, then surface
  * a friendly state. Latency and failure category are logged for every attempt.
  */
+export interface AttemptReport {
+  attempt: number;
+  ok: boolean;
+  latencyMs: number;
+  category?: string;
+}
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
-  opts: { label: string; retries?: number; baseDelayMs?: number },
+  opts: {
+    label: string;
+    retries?: number;
+    baseDelayMs?: number;
+    /** Called once per attempt - every attempt is a billable provider call. */
+    onAttempt?: (report: AttemptReport) => void | Promise<void>;
+    /** Also retry failures of these categories (e.g. `unknown` for an idempotent GET). */
+    alsoRetry?: string[];
+  },
 ): Promise<T> {
   const retries = opts.retries ?? 1;
   const base = opts.baseDelayMs ?? 800;
@@ -36,18 +51,22 @@ export async function withRetry<T>(
     const started = Date.now();
     try {
       const out = await fn();
-      log.info('provider_call_ok', { label: opts.label, attempt, latencyMs: Date.now() - started });
+      const latencyMs = Date.now() - started;
+      log.info('provider_call_ok', { label: opts.label, attempt, latencyMs });
+      await opts.onAttempt?.({ attempt, ok: true, latencyMs });
       return out;
     } catch (raw) {
       const err = categorize(raw);
+      const latencyMs = Date.now() - started;
       log.warn('provider_call_failed', {
         label: opts.label,
         attempt,
-        latencyMs: Date.now() - started,
+        latencyMs,
         category: err.category,
         message: err.message,
       });
-      if (attempt >= retries || !isRetryable(err)) throw err;
+      await opts.onAttempt?.({ attempt, ok: false, latencyMs, category: err.category });
+      if (attempt >= retries || !(isRetryable(err) || opts.alsoRetry?.includes(err.category))) throw err;
       await sleep(base * Math.pow(2, attempt));
       attempt += 1;
     }
@@ -71,6 +90,10 @@ export class TtlCache<T> {
 
   set(key: string, value: T): void {
     this.store.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  clear(): void {
+    this.store.clear();
   }
 
   get size(): number { return this.store.size; }

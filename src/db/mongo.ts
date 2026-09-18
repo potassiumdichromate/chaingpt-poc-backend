@@ -54,6 +54,20 @@ export async function closeMongo(): Promise<void> {
 export const COLLECTIONS = {
   /** Snapshot of real KULT published games - read-only for the POC. */
   games: 'kult_games',
-  /** Everything the POC itself accumulates, as one document per store. */
+  /** Legacy single-document store. Read once for migration, never written. */
   state: 'poc_state',
+  /** Store bookkeeping, e.g. the per-record migration marker. */
+  meta: 'poc_meta',
+} as const;
+
+/** One collection per record type; each record is its own document keyed by id. */
+export const STORE_COLLECTIONS = {
+  agents: 'poc_agents',
+  projects: 'poc_projects',
+  knowledge: 'poc_knowledge',
+  runs: 'poc_runs',
+  actions: 'poc_actions',
+  outcomes: 'poc_outcomes',
+  events: 'poc_events',
+  providerCalls: 'poc_provider_calls',
 } as const;

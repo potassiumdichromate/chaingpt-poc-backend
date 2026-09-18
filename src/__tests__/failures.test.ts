@@ -164,6 +164,18 @@ describe('TtlCache', () => {
 // ---------------------------------------------------------------------------
 
 describe('live ChainGPT regressions', () => {
+  it('treats the SDK\'s bare "Internal server error" as a retryable 5xx', () => {
+    const e = categorize(new Error('Internal server error'));
+    expect(e.category).toBe('upstream_5xx');
+    expect(isRetryable(e)).toBe(true);
+  });
+
+  it('retries a TLS reset once instead of failing the scan as unknown', () => {
+    const e = categorize(new Error('80E1:error:0A0003FC:SSL routines:ssl3_read_bytes:ssl/tls alert bad record mac'));
+    expect(e.category).toBe('upstream_5xx');
+    expect(isRetryable(e)).toBe(true);
+  });
+
   it('classifies an exhausted balance as insufficient_credits, not auth', () => {
     const e = categorize({ status: 400, message: '{"statusCode":400,"message":"Insufficient credits"}' });
     expect(e.category).toBe('insufficient_credits');

@@ -54,16 +54,11 @@ async function main() {
   // --- 1. AI Crypto News ---
   line('\n[1] GET /news');
   try {
-    // Short phrase + fallbacks: the live API matches searchQuery literally, so a
-    // long multi-term query returns zero rows.
-    const signals = await provider.getSignals({
-      searchQuery: 'AI gaming',
-      fallbackQueries: ['web3 gaming', 'gaming', 'web3'],
-      limit: 5,
-      fetchAfter: new Date(Date.now() - 14 * 86_400_000),
-    });
+    // One short phrase: the live API matches searchQuery literally, so a long
+    // multi-term query returns zero rows. Freshness is judged from pubDate.
+    const signals = await provider.fetchNews({ searchQuery: 'AI', limit: 5, sortBy: 'createdAt' }, 'smoke.news');
     if (signals.length === 0) {
-      bad('authenticated but returned 0 articles - widen searchQuery or fetchAfter');
+      bad('authenticated but returned 0 articles - try a broader searchQuery');
       failures += 1;
     } else {
       ok(`${signals.length} signal(s) normalized`);

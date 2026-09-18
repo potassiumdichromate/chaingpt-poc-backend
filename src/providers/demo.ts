@@ -1,5 +1,6 @@
+import { recordProviderCall } from '../analytics.js';
 import type { Signal } from '../types.js';
-import type { IntelligenceProvider, ReasonOptions, SignalQuery } from './types.js';
+import type { IntelligenceProvider, NewsQuery, ReasonOptions } from './types.js';
 
 /**
  * Local fallback provider (spec 17.1). Development only - the recorded showcase
@@ -9,7 +10,8 @@ import type { IntelligenceProvider, ReasonOptions, SignalQuery } from './types.j
 export class DemoProvider implements IntelligenceProvider {
   readonly name = 'demo';
 
-  async getSignals(query: SignalQuery): Promise<Signal[]> {
+  async fetchNews(query: NewsQuery, label = 'demo.news'): Promise<Signal[]> {
+    await recordProviderCall({ provider: this.name, kind: 'news', label, ok: true, latencyMs: 0, estimatedCredits: 0 });
     const now = Date.now();
     return DEMO_SIGNALS.map((s, i) => ({
       ...s,
@@ -18,8 +20,12 @@ export class DemoProvider implements IntelligenceProvider {
     })).slice(0, query.limit ?? 12);
   }
 
-  async reason(prompt: string, _options?: ReasonOptions): Promise<unknown> {
+  async reason(prompt: string, options?: ReasonOptions): Promise<unknown> {
     await new Promise((r) => setTimeout(r, 550));
+    await recordProviderCall({
+      provider: this.name, kind: 'chat', label: options?.label ?? 'demo.chat', ok: true, latencyMs: 550,
+      chatHistory: options?.chatHistory === 'on', estimatedCredits: 0,
+    });
 
     const task = /TASK_ID:\s*(\w+)/.exec(prompt)?.[1] ?? 'opportunity_radar';
     // The prompt builder only emits this block when saved knowledge exists, so its
@@ -27,10 +33,18 @@ export class DemoProvider implements IntelligenceProvider {
     const hasMemory = /RECENT SAVED KNOWLEDGE \(KULT canonical memory\)/.test(prompt)
       && !/\(none yet\)/.test(prompt.split('RECENT SAVED KNOWLEDGE')[1]?.slice(0, 200) ?? '');
     const knowledgeId = /KNOWLEDGE_ID:\s*(\S+)/.exec(prompt)?.[1] ?? '';
+    // Ids the prompt actually offered - the demo cites only these, like a compliant model.
+    const ids = (label: string) => [...prompt.matchAll(new RegExp(`${label}:\\s*(\\S+)`, 'g'))].map((m) => m[1]!);
+    const cues: DemoCues = {
+      evidenceIds: ids('EVIDENCE_ID'),
+      outcomeIds: ids('OUTCOME_ID'),
+      previousIds: ids('PREVIOUS_ID'),
+    };
 
-    if (task === 'deep_research') return { data: { bot: JSON.stringify(demoResearch()) } };
+    if (task === 'decision_review') return { data: { bot: JSON.stringify(demoDecisionReview(prompt)) } };
+    if (task === 'deep_research') return { data: { bot: JSON.stringify(demoResearch(cues.evidenceIds)) } };
     if (task === 'creator_growth') return { data: { bot: JSON.stringify(demoGrowth()) } };
-    return { data: { bot: JSON.stringify(demoOpportunities(hasMemory, knowledgeId)) } };
+    return { data: { bot: JSON.stringify(demoOpportunities(hasMemory, knowledgeId, cues)) } };
   }
 
   async health() {
@@ -62,8 +76,36 @@ const DEMO_SIGNALS: Omit<Signal, 'id' | 'publishedAt'>[] = [
   },
 ];
 
-function demoOpportunities(hasMemory: boolean, knowledgeId: string) {
+interface DemoCues {
+  evidenceIds: string[];
+  outcomeIds: string[];
+  previousIds: string[];
+}
+
+/** Decision fields only exist when the prompt listed previous recommendations. */
+function demoDecision(cues: DemoCues, index: number) {
+  if (cues.previousIds.length === 0) return undefined;
+  if (index === 0 && cues.previousIds[0]) {
+    return {
+      status: 'changed',
+      previousId: cues.previousIds[0],
+      reason: cues.outcomeIds.length
+        ? 'The recorded outcome on the last recommendation changes the approach: follow up on the named programme instead of scanning broadly again.'
+        : 'Saved research narrowed the previous recommendation to one named programme.',
+    };
+  }
+  if (index === 1 && cues.previousIds[1]) {
+    return { status: 'kept', previousId: cues.previousIds[1], reason: 'No new evidence contradicts it; it is still the strongest fit for agent commerce.' };
+  }
+  return { status: 'new', previousId: '', reason: 'New this scan - not part of the previous recommendation set.' };
+}
+
+function demoOpportunities(hasMemory: boolean, knowledgeId: string, cues: DemoCues) {
+  const cite = (i: number) => (cues.evidenceIds[i] ? [cues.evidenceIds[i]!] : []);
   return {
+    dropped: cues.previousIds[2]
+      ? [{ previousId: cues.previousIds[2], reason: 'Superseded by the grant follow-up, which uses the same retention evidence.' }]
+      : [],
     opportunities: [
       {
         title: 'Apply to the Immutable AI-native games grant track',
@@ -80,6 +122,9 @@ function demoOpportunities(hasMemory: boolean, knowledgeId: string) {
             }
           : { used: false, reason: '', knowledgeIds: [] },
         liveEvidence: { used: true, summary: 'Programme announcement is current and applications are open.', evidenceTypes: ['news'] },
+        evidenceIds: cite(0),
+        outcomeIds: cues.outcomeIds.slice(0, 1),
+        decision: demoDecision(cues, 0),
       },
       {
         title: 'Position the Agent for agent-commerce pilot partnerships',
@@ -90,6 +135,9 @@ function demoOpportunities(hasMemory: boolean, knowledgeId: string) {
         action: 'Shortlist three agent-payment infrastructure teams and request a pilot conversation.',
         memoryInfluence: { used: false, reason: '', knowledgeIds: [] },
         liveEvidence: { used: true, summary: 'Multiple live consumer deployments reported recently.', evidenceTypes: ['news', 'market'] },
+        evidenceIds: cite(1),
+        outcomeIds: [],
+        decision: demoDecision(cues, 1),
       },
       {
         title: 'Target creator distribution funds with retention evidence',
@@ -100,12 +148,37 @@ function demoOpportunities(hasMemory: boolean, knowledgeId: string) {
         action: 'Package a one-page retention brief and send it to two ecosystem creator funds.',
         memoryInfluence: { used: false, reason: '', knowledgeIds: [] },
         liveEvidence: { used: false, summary: '', evidenceTypes: [] },
+        evidenceIds: [],
+        outcomeIds: [],
+        decision: demoDecision(cues, 2),
       },
     ],
   };
 }
 
-function demoResearch() {
+/** Mirrors demoDecision: first item changes P1, second keeps P2, third is new, P3 is dropped. */
+function demoDecisionReview(prompt: string) {
+  const items = [...prompt.matchAll(/^- (N\d+):/gm)].map((m) => m[1]!);
+  const prev = [...prompt.matchAll(/^- (P\d+):/gm)].map((m) => m[1]!);
+  const outcome = /^- outcome (\S+):/m.exec(prompt)?.[1];
+  return {
+    decisions: items.map((item, i) => {
+      if (i === 0 && prev[0]) {
+        return {
+          item, status: 'changed', previousId: prev[0],
+          reason: outcome
+            ? `Outcome ${outcome} (no response) changes the approach: follow up on the named programme instead of scanning broadly again.`
+            : 'Saved research narrowed the previous recommendation to one named programme.',
+        };
+      }
+      if (i === 1 && prev[1]) return { item, status: 'kept', previousId: prev[1], reason: 'No new evidence contradicts it; it is still the strongest fit for agent commerce.' };
+      return { item, status: 'new', previousId: '', reason: 'New this scan - not part of the previous recommendation set.' };
+    }),
+    dropped: prev[2] ? [{ previousId: prev[2], reason: 'Superseded by the grant follow-up, which uses the same retention evidence.' }] : [],
+  };
+}
+
+function demoResearch(evidenceIds: string[]) {
   return {
     summary:
       'The grant track funds AI-native game studios and attaches ecosystem distribution support, making it a distribution channel as much as a funding source.',
@@ -115,7 +188,10 @@ function demoResearch() {
     liveEvidence: {
       summary: 'Current announcement coverage confirms the track is open; no on-chain metrics are relevant to a grant application.',
       items: [
-        { type: 'news', evidence: 'Grant track announcement is recent and applications are confirmed open.', sourceLabel: 'ChainGPT AI News (demo)' },
+        {
+          type: 'news', evidence: 'Grant track announcement is recent and applications are confirmed open.',
+          sourceLabel: 'ChainGPT AI News (demo)', evidenceId: evidenceIds[0] ?? '',
+        },
       ],
       confidenceNote: 'Demo provider output - not live ChainGPT evidence.',
     },

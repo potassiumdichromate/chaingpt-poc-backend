@@ -33,6 +33,23 @@ was reproduced against the running service.
 | [A-14](#a-14) | **Low** | `LOG_LEVEL=debug` writes raw model output to logs | yes |
 | [A-15](#a-15) | **Low** | No HTTP-layer test coverage | yes |
 
+### Status after the 2026-09-18 intelligence-loop work
+
+| ID | Status |
+|---|---|
+| A-1 | **Fixed.** `AUTH_MODE` (`api_key` / `privy`), admin-gated reset (`ADMIN_TOKEN`; closed in production without one), per-client + global limits on the credit-spending routes, a flood cap on all `/api` routes. Covered by `http.test.ts`. |
+| A-2 | **Fixed.** Invalid bodies return `400` with Zod issues; malformed JSON returns `400`, oversized bodies `413`. |
+| A-3, A-5 | Open (config defaults unchanged). |
+| A-4 | Unchanged: set `MONGODB_URI` on any deployment. |
+| A-6 | **Fixed** in `.env.example` (`KULT_API_BASE` blank). |
+| A-7 | **Partly fixed.** Writes are per record, so two writers no longer overwrite each other; reads are still served from one process's memory, so it remains single-instance. |
+| A-8 | **Fixed.** Every record is its own document; no 16 MB ceiling, and a write touches only changed records. |
+| A-9 | **Fixed.** The research panel shows action/outcome failures. |
+| A-11 | **Fixed.** Actions require an existing Agent; outcomes require an action of the same Agent. |
+| A-12 | **Moot.** Memory enforcement and its schema were removed (the Decision Delta replaces it). |
+| A-13 | Mitigated: reset is gated on both mount paths. |
+| A-15 | **Fixed.** `http.test.ts` exercises auth, reset, rate limits and validation over real requests. |
+
 ---
 
 ## <a id="a-1"></a>A-1 — No authentication or rate limiting · **High**

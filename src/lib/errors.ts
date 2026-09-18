@@ -73,6 +73,18 @@ export function categorize(err: unknown): ProviderError {
     if (status >= 500) return new ProviderError('upstream_5xx', msg || `Upstream ${status}`, err);
   }
 
+  // Transport failures mid-request are transient. VERIFIED LIVE 2026-09-18: TLS
+  // "bad record mac" resets hit both ChainGPT and Atlas from the same network, and
+  // as `unknown` they failed the whole scan without the one retry they deserve.
+  if (/ECONNRESET|EPIPE|socket hang up|bad record mac|ERR_SSL|EAI_AGAIN/i.test(msg)) {
+    return new ProviderError('upstream_5xx', msg || 'Connection reset', err);
+  }
+  // VERIFIED LIVE 2026-09-18: the chat SDK surfaces a 500 as the bare message
+  // "Internal server error", with no status to read.
+  if (/internal server error|bad gateway|service unavailable|gateway time-?out/i.test(msg)) {
+    return new ProviderError('upstream_5xx', msg, err);
+  }
+
   // No usable status - fall back to error class names and message shape.
   if (name === 'AbortError' || name === 'TimeoutError' || /timeout|ETIMEDOUT|aborted/i.test(msg)) {
     return new ProviderError('timeout', msg || 'Request timed out', err);

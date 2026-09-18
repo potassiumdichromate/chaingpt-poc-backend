@@ -4,10 +4,11 @@ import { AI_TONE, PRE_SET_TONES } from '@chaingpt/generalchat/dist/enum/context.
 import { config } from '../config.js';
 import { log } from '../lib/logger.js';
 import { ProviderError, categorize } from '../lib/errors.js';
-import { withRetry, withTimeout, TtlCache } from '../lib/resilience.js';
+import { withRetry, withTimeout } from '../lib/resilience.js';
 import { accumulateStream } from '../intelligence/parser.js';
+import { recordProviderCall } from '../analytics.js';
 import type { Signal } from '../types.js';
-import type { IntelligenceProvider, ReasonOptions, SignalQuery } from './types.js';
+import type { IntelligenceProvider, NewsQuery, ReasonOptions } from './types.js';
 
 /**
  * ChainGPT provider.
@@ -23,7 +24,6 @@ export class ChainGPTProvider implements IntelligenceProvider {
 
   private news?: AINews;
   private chat?: GeneralChat;
-  private signalCache = new TtlCache<Signal[]>(config.signalCacheTtlMs);
 
   constructor(private apiKey: string) {
     if (!apiKey) throw new Error('ChainGPTProvider requires an API key');
@@ -35,97 +35,38 @@ export class ChainGPTProvider implements IntelligenceProvider {
 
   // ---------------------------------------------------------------- signals
 
-  async getSignals(query: SignalQuery): Promise<Signal[]> {
-    const key = JSON.stringify({
-      q: query.searchQuery,
-      l: query.limit ?? 12,
-      // Bucket the freshness cutoff so near-identical scans share a cache entry.
-      a: query.fetchAfter ? Math.floor(query.fetchAfter.getTime() / 3_600_000) : null,
-    });
-
-    const cached = this.signalCache.get(key);
-    if (cached) {
-      log.info('signal_cache_hit', { searchQuery: query.searchQuery, count: cached.length });
-      return cached;
-    }
-
-    // The live News API matches searchQuery as a literal phrase, so a specific
-    // query can legitimately return zero rows. Walk to broader phrases rather
-    // than handing the reasoning step an empty signal set.
-    const attempts = [query.searchQuery, ...(query.fallbackQueries ?? [])].filter(Boolean);
-    let signals = await this.walkQueries(query, attempts, query.fetchAfter);
-
-    // VERIFIED LIVE: the searchable corpus can lag the unfiltered feed by weeks,
-    // so every phrase above returns zero purely because of the freshness cutoff
-    // while the same phrases return rows without it. Older signals carry their
-    // own publishedAt into the prompt, so the model can judge staleness itself -
-    // that beats reasoning with no external evidence at all.
-    if (signals.length === 0 && query.fetchAfter) {
-      signals = await this.walkQueries(query, attempts, undefined);
-      if (signals.length > 0) {
-        log.info('signal_freshness_relaxed', {
-          requested: query.searchQuery,
-          cutoff: query.fetchAfter.toISOString(),
-          count: signals.length,
-        });
-      }
-    }
-
-    this.signalCache.set(key, signals);
-    return signals;
+  /** One AI News request on the configured transport. Walking and caching live upstream. */
+  async fetchNews(query: NewsQuery, label = 'chaingpt.news'): Promise<Signal[]> {
+    const params = buildNewsParams(query);
+    return withRetry(
+      () =>
+        withTimeout(
+          config.chaingpt.transport === 'sdk' ? this.fetchNewsSdk(params) : this.fetchNewsRest(params),
+          config.timeouts.news,
+          label,
+        ),
+      {
+        label,
+        // VERIFIED LIVE: the SDK wraps transport failures in an AINewsError with no
+        // message, so they categorize as `unknown`. A news GET is idempotent - retry it.
+        alsoRetry: ['unknown'],
+        onAttempt: (a) => recordProviderCall({
+          provider: this.name, kind: 'news', label, ok: a.ok, category: a.category, latencyMs: a.latencyMs,
+          estimatedCredits: a.ok ? config.credits.perNews : 0,
+        }),
+      },
+    );
   }
 
-  /** Tries each phrase in order under one freshness cutoff, stopping at the first hit. */
-  private async walkQueries(
-    query: SignalQuery,
-    attempts: string[],
-    fetchAfter: Date | undefined,
-  ): Promise<Signal[]> {
-    for (const searchQuery of attempts) {
-      const attempt = { ...query, searchQuery, fetchAfter };
-      const signals = await withRetry(
-        () =>
-          withTimeout(
-            config.chaingpt.transport === 'sdk'
-              ? this.getSignalsSdk(attempt)
-              : this.getSignalsRest(attempt),
-            config.timeouts.news,
-            'chaingpt.news',
-          ),
-        { label: 'chaingpt.news' },
-      );
-      if (signals.length > 0) {
-        if (searchQuery !== query.searchQuery) {
-          log.info('signal_query_fallback', { requested: query.searchQuery, used: searchQuery, count: signals.length });
-        }
-        return signals;
-      }
-      log.debug('signal_query_empty', { searchQuery, fetchAfter: fetchAfter?.toISOString() });
-    }
-    return [];
+  private async fetchNewsSdk(params: NewsParams): Promise<Signal[]> {
+    // The SDK sends `params` through axios as a GET query string - the exact
+    // encoding `newsQueryString` reproduces for the REST transport.
+    return normalizeNews(await this.news!.getNews({ ...params }));
   }
 
-  private async getSignalsSdk(query: SignalQuery): Promise<Signal[]> {
-    const res = await this.news!.getNews({
-      searchQuery: query.searchQuery,
-      limit: query.limit ?? 12,
-      offset: 0,
-      sortBy: query.sortBy ?? 'createdAt',
-      ...(query.fetchAfter ? { fetchAfter: query.fetchAfter } : {}),
-      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
-      ...(query.subCategoryId ? { subCategoryId: query.subCategoryId } : {}),
-      ...(query.tokenId ? { tokenId: query.tokenId } : {}),
-    });
-    return normalizeNews(res);
-  }
-
-  private async getSignalsRest(query: SignalQuery): Promise<Signal[]> {
+  private async fetchNewsRest(params: NewsParams): Promise<Signal[]> {
     const url = new URL('/news', config.chaingpt.baseUrl);
-    url.searchParams.set('searchQuery', query.searchQuery);
-    url.searchParams.set('limit', String(query.limit ?? 12));
-    url.searchParams.set('offset', '0');
-    url.searchParams.set('sortBy', query.sortBy ?? 'createdAt');
-    if (query.fetchAfter) url.searchParams.set('fetchAfter', query.fetchAfter.toISOString());
+    url.search = newsQueryString(params);
 
     const res = await fetch(url, {
       method: 'GET',
@@ -149,6 +90,7 @@ export class ChainGPTProvider implements IntelligenceProvider {
 
   async reason(prompt: string, options: ReasonOptions = {}): Promise<unknown> {
     const label = options.label ?? 'chaingpt.chat';
+    const chatHistory = (options.chatHistory ?? 'off') === 'on';
     return withRetry(
       () =>
         withTimeout(
@@ -156,7 +98,14 @@ export class ChainGPTProvider implements IntelligenceProvider {
           options.timeoutMs ?? config.timeouts.reasoning,
           label,
         ),
-      { label },
+      {
+        label,
+        onAttempt: (a) => recordProviderCall({
+          provider: this.name, kind: 'chat', label, ok: a.ok, category: a.category, latencyMs: a.latencyMs,
+          chatHistory,
+          estimatedCredits: a.ok ? config.credits.perChat + (chatHistory ? config.credits.perChatHistory : 0) : 0,
+        }),
+      },
     );
   }
 
@@ -220,7 +169,7 @@ export class ChainGPTProvider implements IntelligenceProvider {
 
   async health(): Promise<{ ok: boolean; detail: string }> {
     try {
-      const signals = await this.getSignals({ searchQuery: 'web3', limit: 1 });
+      const signals = await this.fetchNews({ limit: 1 }, 'chaingpt.health');
       return { ok: true, detail: `news reachable (${signals.length} signal(s))` };
     } catch (err) {
       const e = categorize(err);
@@ -253,8 +202,12 @@ const KULT_CONTEXT_INJECTION = {
  *
  * Verified shape: { statusCode, message, data: [ ... ] } where each row carries
  * `title`, `description`, `pubDate` (true publication time), `createdAt`
- * (ingest time), `author`, `imageUrl`, and a nullable `category`/`token`.
+ * (ingest time), `author`, `imageUrl`, and nullable `category` {id,name},
+ * `subCategory` {id,name} (the chain) and `token` {id,name}.
  * There is NO url/link field, so `url` stays undefined rather than invented.
+ *
+ * Both transports return the same body, and both pass it through here, so SDK and
+ * REST output is normalized identically by construction.
  */
 export function normalizeNews(res: unknown): Signal[] {
   const r = res as Record<string, any>;
@@ -284,10 +237,80 @@ export function normalizeNews(res: unknown): Signal[] {
         // never invent missing source metadata).
         url: row?.url ?? row?.link ?? row?.sourceUrl ?? undefined,
         publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(),
-        category: row?.category?.name ?? row?.categoryName ?? row?.token?.name ?? undefined,
+        category: row?.category?.name ?? row?.categoryName ?? undefined,
+        categoryId: numberOrUndefined(row?.category?.id ?? row?.categoryId),
+        // VERIFIED LIVE: subCategory is the chain ("Ethereum", "Bitcoin"), token the asset.
+        chain: row?.subCategory?.name ?? undefined,
+        token: row?.token?.name ?? undefined,
       };
     })
     .filter((s) => s.title && s.title !== 'Untitled signal');
+}
+
+function numberOrUndefined(v: unknown): number | undefined {
+  const n = Number(v);
+  return v !== null && v !== undefined && Number.isInteger(n) ? n : undefined;
+}
+
+// ------------------------------------------------------------ request params
+
+/** The one request shape both transports send. Mirrors the SDK's FindNewsDto. */
+export interface NewsParams {
+  searchQuery?: string;
+  limit: number;
+  offset: number;
+  sortBy: string;
+  fetchAfter?: Date;
+  categoryId?: number[];
+  subCategoryId?: number[];
+  tokenId?: number[];
+}
+
+/**
+ * Normalizes a NewsQuery into request params. Empty filters are dropped rather
+ * than sent as `[]`, because the SDK deletes undefined keys and an empty array
+ * would otherwise reach the API on one transport but not the other.
+ */
+export function buildNewsParams(q: NewsQuery): NewsParams {
+  const ids = (xs?: number[]) => (xs && xs.length ? [...xs] : undefined);
+  const params: NewsParams = {
+    ...(q.searchQuery?.trim() ? { searchQuery: q.searchQuery.trim() } : {}),
+    limit: q.limit ?? 12,
+    offset: q.offset ?? 0,
+    sortBy: q.sortBy ?? 'createdAt',
+    ...(q.fetchAfter ? { fetchAfter: q.fetchAfter } : {}),
+    ...(ids(q.categoryId) ? { categoryId: ids(q.categoryId) } : {}),
+    ...(ids(q.subCategoryId) ? { subCategoryId: ids(q.subCategoryId) } : {}),
+    ...(ids(q.tokenId) ? { tokenId: ids(q.tokenId) } : {}),
+  };
+  return params;
+}
+
+/** axios's query encoding: encodeURIComponent, then `:` `$` `,` restored and space as `+`. */
+function axiosEncode(v: string): string {
+  return encodeURIComponent(v)
+    .replace(/%3A/gi, ':')
+    .replace(/%24/g, '$')
+    .replace(/%2C/gi, ',')
+    .replace(/%20/g, '+');
+}
+
+/**
+ * Serializes params exactly as the SDK's axios GET does (arrays as `key[]=v`,
+ * dates as ISO strings), so the REST transport sends a byte-identical query.
+ * VERIFIED against axios 1.19 getUri() output - see normalizeNews.test.ts.
+ */
+export function newsQueryString(p: NewsParams): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(p)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const v of value) parts.push(`${axiosEncode(`${key}[]`)}=${axiosEncode(String(v))}`);
+    } else {
+      parts.push(`${axiosEncode(key)}=${axiosEncode(value instanceof Date ? value.toISOString() : String(value))}`);
+    }
+  }
+  return parts.join('&');
 }
 
 export { accumulateStream };

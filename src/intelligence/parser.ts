@@ -173,6 +173,16 @@ export function normalizeShape(value: unknown, wrapperKey: string): unknown {
       rec.liveEvidence = objectify(rec.liveEvidence, (text) => ({
         used: text.trim().length > 0, summary: text, evidenceTypes: [],
       }));
+      // Same failure mode for the decision object: "Kept from P1 because ...".
+      // The P-label is still validated by the engine, so a guess here cannot
+      // link to a recommendation that was never shown.
+      if (rec.decision !== undefined) {
+        rec.decision = objectify(rec.decision, (text) => ({
+          status: /\bkept\b|\bkeep/i.test(text) ? 'kept' : /chang|revis|replac/i.test(text) ? 'changed' : 'new',
+          previousId: /\bP\d\b/.exec(text)?.[0] ?? '',
+          reason: text,
+        }));
+      }
 
       return rec;
     });

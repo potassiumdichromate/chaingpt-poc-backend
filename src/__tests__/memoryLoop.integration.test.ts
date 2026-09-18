@@ -3,6 +3,7 @@ import { db, initStore } from '../db/store.js';
 import { generateDeepResearch, generateOpportunities, generateGrowthPlan } from '../intelligence/engine.js';
 import { computeMetrics } from '../analytics.js';
 import { seedAgents, seedProjects } from '../db/seed.js';
+import { recordAction, recordOutcome, saveKnowledge } from '../intelligence/memory.js';
 
 /**
  * Spec 19.1 - the P0 integration test, automated.
@@ -22,7 +23,7 @@ const project = seedProjects()[0]!;
 async function resetAll() {
   await initStore();
   await db.mutate((s) => {
-    s.knowledge = []; s.runs = []; s.actions = []; s.outcomes = []; s.events = [];
+    s.knowledge = []; s.runs = []; s.actions = []; s.outcomes = []; s.events = []; s.providerCalls = [];
     s.agents = seedAgents(); s.projects = seedProjects();
   });
 }
@@ -124,5 +125,106 @@ describe('P0 memory feedback loop (spec 19.1)', () => {
     const ev = db.read().events.find((e) => e.name === 'creator_growth_plan_generated');
     expect(ev?.agentId).toBe(agent.id);
     expect(ev?.projectId).toBe(project.id);
+  });
+});
+
+/**
+ * The hero demo, automated: scan -> research -> remember -> act -> outcome ->
+ * scan again -> new evidence -> keep or change the decision, and explain why.
+ */
+describe('hero loop: the Agent changes or keeps its decision and says why', () => {
+  beforeEach(resetAll);
+
+  it('runs the full loop with a plan, provenance, confidence and a Decision Delta', async () => {
+    // 1. First scan: plan -> evidence -> recommendations. No previous decision yet.
+    const first = await generateOpportunities(agent);
+    expect(first.plan.needs.length).toBeGreaterThan(0);
+    expect(first.plan.needs.every((n) => n.question && n.reason)).toBe(true);
+    expect(first.evidence.every((e) => /^E\d+$/.test(e.id) && e.ageDays >= 0 && e.freshness)).toBe(true);
+    expect(first.evidenceQuality.total).toBe(first.evidence.length);
+    expect(first.decisionDelta).toBeNull();
+    expect(first.opportunities.every((o) => o.decision === undefined)).toBe(true);
+    expect(first.opportunities.every((o) => o.confidence.reasons.length > 0)).toBe(true);
+    // Cited evidence must be evidence that was actually retrieved.
+    const retrieved = new Set(first.evidence.map((e) => e.id));
+    expect(first.opportunities.flatMap((o) => o.provenance.evidence).every((e) => retrieved.has(e.id))).toBe(true);
+
+    // 2. Research the top recommendation - research evidence is R-numbered with ages.
+    const target = first.opportunities[0]!;
+    const { research, evidence: researchEvidence } = await generateDeepResearch(agent, target);
+    expect(researchEvidence.every((e) => /^R\d+$/.test(e.id))).toBe(true);
+    const cited = research.liveEvidence.items.filter((i) => i.evidenceId);
+    expect(cited.every((i) => i.freshness && typeof i.ageDays === 'number')).toBe(true);
+
+    // 3. Remember, 4. act, 5. get an outcome.
+    await saveKnowledge({
+      id: 'kn_hero', agentId: agent.id, type: 'opportunity_research', title: target.title,
+      summary: research.summary, payload: { research }, sourceProvider: 'demo', sourceRefs: [],
+      createdAt: new Date().toISOString(),
+    });
+    await recordAction({
+      id: 'act_hero', agentId: agent.id, opportunityId: target.id, opportunityTitle: target.title,
+      runId: first.runId, actionType: 'applied_to_program', status: 'taken', createdAt: new Date().toISOString(),
+    });
+    await recordOutcome({
+      id: 'out_hero', agentId: agent.id, actionId: 'act_hero', outcomeType: 'no_response',
+      notes: 'No reply after a week', createdAt: new Date().toISOString(),
+    });
+
+    // 6. Scan again.
+    const second = await generateOpportunities(agent);
+
+    // The plan reacts to the outcome: the Agent decided to look for something new.
+    const outcomeNeed = second.plan.needs.find((n) => n.trigger === 'outcome');
+    expect(outcomeNeed?.triggerRef?.id).toBe('out_hero');
+    expect(outcomeNeed?.question).toMatch(/alternatives/);
+
+    // The outcome reached the model and is cited as provenance.
+    expect(second.usedOutcomeIds).toContain('out_hero');
+    const outcomeCited = second.opportunities.filter((o) => o.provenance.outcomes.some((x) => x.id === 'out_hero'));
+    expect(outcomeCited.length).toBeGreaterThanOrEqual(1);
+    expect(outcomeCited[0]!.provenance.outcomes[0]!.opportunityTitle).toBe(target.title);
+
+    // 7. Decision Delta: previous recommendation -> learned -> changed -> why.
+    const delta = second.decisionDelta!;
+    expect(delta.previousRunId).toBe(first.runId);
+    expect(delta.learned.outcomes.map((o) => o.id)).toEqual(['out_hero']);
+    expect(delta.learned.knowledge.map((k) => k.id)).toEqual(['kn_hero']);
+    expect(delta.learned.actions.map((a) => a.id)).toEqual(['act_hero']);
+    expect(delta.decisions).toHaveLength(second.opportunities.length);
+    expect(delta.counts.changed + delta.counts.kept).toBeGreaterThanOrEqual(1);
+
+    const changed = second.opportunities.find((o) => o.decision?.status === 'changed');
+    expect(changed?.decision?.previousOpportunityId).toBe(first.opportunities[0]!.id);
+    expect(changed?.decision?.reason.length).toBeGreaterThan(10);
+    expect(changed?.decision?.attribution).toBe('model');
+    expect(delta.summary).toMatch(/learned 1 outcome, 1 saved research item, 1 action/);
+
+    // The same demo news came back, so the delta must not claim new evidence.
+    expect(delta.learned.newEvidence).toEqual([]);
+    expect(delta.learned.repeatedEvidence).toBe(second.evidence.length);
+
+    // 8. Metrics see the whole loop.
+    const m = computeMetrics();
+    expect(m.opportunityScans).toBe(2);
+    expect(m.decisionDeltas).toBe(1);
+    expect(m.recommendationsActedOn).toBe(1);
+    expect(m.recordedOutcomes).toBe(1);
+    expect(m.recommendationToOutcomeRate).toBeGreaterThan(0);
+    expect(m.memoryInformedScans).toBeGreaterThanOrEqual(1);
+    // Demo calls are recorded but never counted as ChainGPT spend.
+    expect(db.read().providerCalls.length).toBeGreaterThan(0);
+    expect(m.chaingptCalls).toBe(0);
+  });
+
+  it('persists the plan, evidence and delta on the run for the history view', async () => {
+    await generateOpportunities(agent);
+    await generateOpportunities(agent);
+    const runs = db.read().runs.filter((r) => r.agentId === agent.id);
+    expect(runs).toHaveLength(2);
+    expect(runs[0]!.decisionDelta).toBeNull();
+    expect(runs[1]!.previousRunId).toBe(runs[0]!.id);
+    expect(runs[1]!.decisionDelta?.summary).toMatch(/Nothing new since the last scan/);
+    expect(runs[1]!.plan?.needs.some((n) => n.trigger === 'previous_recommendation')).toBe(true);
   });
 });

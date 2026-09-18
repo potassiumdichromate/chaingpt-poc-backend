@@ -13,6 +13,28 @@ const memoryInfluenceSchema = z
   })
   .default({ used: false, reason: '' });
 
+/**
+ * Id lists the model cites. Lenient on shape - live output has used both arrays
+ * and "E1, E2" strings - because the engine validates every id against what was
+ * actually in the prompt anyway. Garbage becomes an empty list, never a 502.
+ */
+const idList = z
+  .preprocess(
+    (v) => (typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : v ?? []),
+    z.array(z.coerce.string()),
+  )
+  .catch([]);
+
+/** How a recommendation relates to the previous scan. Validated against P-labels by the engine. */
+const decisionSchema = z
+  .object({
+    status: z.enum(['kept', 'changed', 'new']).catch('new'),
+    previousId: z.coerce.string().default(''),
+    reason: z.coerce.string().default(''),
+  })
+  .optional()
+  .catch(undefined);
+
 const liveEvidenceSummarySchema = z
   .object({
     used: z.boolean().default(false),
@@ -37,10 +59,18 @@ export const opportunitySchema = z.object({
   action: z.string().min(3),
   memoryInfluence: memoryInfluenceSchema,
   liveEvidence: liveEvidenceSummarySchema,
+  evidenceIds: idList,
+  outcomeIds: idList,
+  decision: decisionSchema,
 });
 
 export const opportunitySetSchema = z.object({
   opportunities: z.array(opportunitySchema).min(1).max(5),
+  /** Previous recommendations the model chose not to continue, with its reason. */
+  dropped: z
+    .array(z.object({ previousId: z.coerce.string().default(''), reason: z.coerce.string().default('') }))
+    .catch([])
+    .default([]),
 });
 
 export const deepResearchSchema = z.object({
@@ -56,6 +86,7 @@ export const deepResearchSchema = z.object({
             type: z.enum(['news', 'on-chain', 'market', 'social']).catch('news'),
             evidence: z.string(),
             sourceLabel: z.string().default('ChainGPT'),
+            evidenceId: z.coerce.string().default(''),
           }),
         )
         .default([]),
@@ -90,11 +121,20 @@ export const growthPlanSchema = z.object({
     .default({ positioning: '', firstAction: '' }),
 });
 
-/** Spec 8.2 memory-enforcement revision (see buildMemoryEnforcementPrompt). */
-export const memoryEnforcementSchema = z.object({
-  index: z.coerce.number().int().min(0).max(4),
-  knowledgeIds: z.array(z.string()).default([]),
-  reason: z.string().min(10),
+/** Decision review (see buildDecisionReviewPrompt). Labels are validated by the engine. */
+export const decisionReviewSchema = z.object({
+  decisions: z
+    .array(z.object({
+      item: z.coerce.string(),
+      status: z.enum(['kept', 'changed', 'new']).catch('new'),
+      previousId: z.coerce.string().default(''),
+      reason: z.coerce.string().default(''),
+    }))
+    .min(1),
+  dropped: z
+    .array(z.object({ previousId: z.coerce.string().default(''), reason: z.coerce.string().default('') }))
+    .catch([])
+    .default([]),
 });
 
 export type OpportunitySetOut = z.infer<typeof opportunitySetSchema>;

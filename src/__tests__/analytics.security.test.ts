@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, initStore } from '../db/store.js';
-import { computeMetrics, recentEvents, track } from '../analytics.js';
+import { computeMetrics, recentEvents, recordProviderCall, track } from '../analytics.js';
+import { runWithContext } from '../lib/requestContext.js';
 import { config } from '../config.js';
 
 /** Spec 19: event logger unit tests + the API-key-never-reaches-the-client check. */
@@ -10,7 +11,9 @@ import { config } from '../config.js';
 describe('event logger', () => {
   beforeEach(async () => {
     await initStore();
-    await db.mutate((s) => { s.events = []; s.knowledge = []; s.runs = []; s.actions = []; s.outcomes = []; });
+    await db.mutate((s) => {
+      s.events = []; s.knowledge = []; s.runs = []; s.actions = []; s.outcomes = []; s.providerCalls = [];
+    });
   });
 
   it('persists an event with a timestamp and id', async () => {
@@ -39,16 +42,52 @@ describe('event logger', () => {
     expect(m.uniqueAgentsUsingIntelligence).toBe(2);
   });
 
-  it('computes recommendation-to-action rate from surfaced opportunities', async () => {
+  it('computes recommendation-to-action rate from distinct recommendations acted on', async () => {
+    const now = new Date().toISOString();
     await db.mutate((s) => {
       s.runs.push({
         id: 'r1', agentId: 'a1', query: 'q', provider: 'demo', signalIds: [],
-        usedKnowledgeIds: [], result: { opportunities: [{}, {}, {}, {}] },
-        createdAt: new Date().toISOString(),
+        usedKnowledgeIds: [], result: { opportunities: [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }, { id: 'o4' }] },
+        createdAt: now,
       });
+      // Two actions on the same card are ONE recommendation acted on; a dismissal is none.
+      s.actions.push(
+        { id: 'a1', agentId: 'a1', opportunityId: 'o1', opportunityTitle: 't', actionType: 'applied_to_program', status: 'taken', createdAt: now },
+        { id: 'a2', agentId: 'a1', opportunityId: 'o1', opportunityTitle: 't', actionType: 'created_campaign', status: 'taken', createdAt: now },
+        { id: 'a3', agentId: 'a1', opportunityId: 'o2', opportunityTitle: 't', actionType: 'dismissed', status: 'dismissed', createdAt: now },
+      );
+      s.outcomes.push({ id: 'x1', agentId: 'a1', actionId: 'a1', outcomeType: 'conversation_started', createdAt: now });
     });
-    await track('recommended_action_taken', { agentId: 'a1' });
-    expect(computeMetrics().recommendationToActionRate).toBe(0.25);
+    const m = computeMetrics();
+    expect(m.recommendationsSurfaced).toBe(4);
+    expect(m.recommendationsActedOn).toBe(1);
+    expect(m.recommendationToActionRate).toBe(0.25);
+    expect(m.recommendationToOutcomeRate).toBe(0.25);
+    expect(m.actionToOutcomeRate).toBe(0.333);
+    expect(m.positiveOutcomes).toBe(1);
+  });
+
+  it('counts ChainGPT calls and estimated credits, excluding other providers', async () => {
+    await recordProviderCall({ provider: 'chaingpt', kind: 'news', label: 'n', ok: true, latencyMs: 5, estimatedCredits: 1 });
+    await recordProviderCall({ provider: 'chaingpt', kind: 'chat', label: 'c', ok: true, latencyMs: 5, estimatedCredits: 2 });
+    await recordProviderCall({ provider: 'chaingpt', kind: 'chat', label: 'c', ok: false, category: 'timeout', latencyMs: 5, estimatedCredits: 0 });
+    await recordProviderCall({ provider: 'demo', kind: 'chat', label: 'c', ok: true, latencyMs: 5, estimatedCredits: 0 });
+    const m = computeMetrics();
+    expect(m.chaingptCalls).toBe(3);
+    expect(m.chaingptNewsCalls).toBe(1);
+    expect(m.chaingptChatCalls).toBe(2);
+    expect(m.chaingptFailedCalls).toBe(1);
+    expect(m.estimatedCreditsSpent).toBe(3);
+  });
+
+  it('counts distinct clients and authenticated users from the request context', async () => {
+    await runWithContext({ clientId: 'client_aaaaaaaa' }, () => track('intelligence_exposed', { agentId: 'a1' }));
+    await runWithContext({ clientId: 'client_aaaaaaaa' }, () => track('intelligence_exposed', { agentId: 'a2' }));
+    await runWithContext({ clientId: 'client_bbbbbbbb', userId: 'did:privy:u1' }, () => track('intelligence_exposed', { agentId: 'a1' }));
+    const m = computeMetrics();
+    expect(m.uniqueClients).toBe(2);
+    expect(m.uniqueAuthenticatedUsers).toBe(1);
+    expect(m.uniqueAgentsUsingIntelligence).toBe(2);
   });
 
   it('reports a zero rate rather than dividing by zero', () => {
@@ -63,7 +102,16 @@ describe('event logger', () => {
 });
 
 describe('security - secrets never leave the server (spec 18)', () => {
-  const frontendDir = path.resolve(process.cwd(), '../frontend/src');
+  // The frontend has shipped under both folder names; a missing folder used to make
+  // every check below pass vacuously, so the suite now fails if neither exists.
+  const frontendRoot = ['../frontend', '../chaingpt-poc-frontend-main']
+    .map((d) => path.resolve(process.cwd(), d))
+    .find((d) => fs.existsSync(path.join(d, 'src'))) ?? '';
+  const frontendDir = path.join(frontendRoot, 'src');
+
+  it('finds the frontend source to scan', () => {
+    expect(frontendRoot).not.toBe('');
+  });
 
   function walk(dir: string): string[] {
     if (!fs.existsSync(dir)) return [];
@@ -107,7 +155,7 @@ describe('security - secrets never leave the server (spec 18)', () => {
   });
 
   it('the frontend .env.example carries no secret-looking keys', () => {
-    const p = path.resolve(process.cwd(), '../frontend/.env.example');
+    const p = path.join(frontendRoot, '.env.example');
     if (!fs.existsSync(p)) return;
     const src = fs.readFileSync(p, 'utf8');
     expect(src).not.toMatch(/CHAINGPT_API_KEY|MONGODB_URI|PRIVY_APP_SECRET|JWT_SECRET/);

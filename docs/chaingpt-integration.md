@@ -128,10 +128,14 @@ Per user-visible action:
 
 | Action | Provider calls |
 |---|---|
-| Discover | 1 news (cacheable) + 1 reasoning (+1 if degraded, +1 if repair, +1 if enforcement) |
-| Research | 1 news + 1 reasoning (+repair) |
-| Grow | 1 news + 1 reasoning (+repair) |
+| Discover | 1-9 news (evidence plan; identical searches shared) + 1 reasoning (+1 if degraded) + usually 1 repair + 1 decision review on repeat scans |
+| Research | 1-4 news + 1 reasoning (+repair) |
+| Grow | 1-5 news + 1 reasoning (+repair) |
 | Deep health check | 1 news (1 row) |
+
+Chat history is off everywhere (KULT injects memory), so no call pays the +1 history
+credit. See [intelligence-loop.md](intelligence-loop.md) for the live-model findings
+that shaped these numbers.
 
 Cost controls already in place: the 600s signal cache, the 6-signal cap, the ~5k prompt
 bound, the single repair attempt, and no retry on credit or auth failures.

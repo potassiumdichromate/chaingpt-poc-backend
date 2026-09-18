@@ -8,9 +8,14 @@ actionable opportunities** — and it remembers. Saved research is injected into
 request and visibly changes the next recommendation.
 
 ```
-Agent Context → ChainGPT Intelligence → Personalized Opportunity
-     → Research → Saved Knowledge → Better Next Recommendation
+Agent scans → researches → remembers → acts → gets an outcome
+     → scans again → sees new evidence → keeps or changes its decision, and says why
 ```
+
+Each scan first decides what live ChainGPT evidence it needs (from its last outcome,
+last recommendation and goal), retrieves only that, labels every article's age, cites
+exactly which evidence and KULT memory each recommendation rests on, and on a repeat scan
+returns a Decision Delta. See [docs/intelligence-loop.md](docs/intelligence-loop.md).
 
 This is not a chatbot proxy and not a news feed. The value is the loop.
 
@@ -41,7 +46,7 @@ curl -X POST http://localhost:8787/api/agents/agent_kult_nova/opportunities -d '
 | `npm run build` | Compiles `src/` to `dist/` via `tsconfig.build.json`. |
 | `npm start` | Runs the compiled server (`dist/index.js`). |
 | `npm run typecheck` | Type-checks `src/` **and** `scripts/` with no emit. |
-| `npm test` | 128 vitest tests across 7 files. |
+| `npm test` | 232 vitest tests across 14 files, including HTTP-level tests and the full hero loop. |
 | `npm run smoke` | Live ChainGPT API verification. Checks credits first. |
 | `npm run verify` | Full P0 showcase flow end to end — the readiness gate. |
 | `npm run seed:kult` | Copies real published KULT games into the POC's own database. |
@@ -54,6 +59,7 @@ curl -X POST http://localhost:8787/api/agents/agent_kult_nova/opportunities -d '
 | [API reference](docs/api-reference.md) | You are calling this service. |
 | [Frontend integration](docs/frontend-integration.md) | You are building or maintaining a client. |
 | [Design system](docs/design-system.md) | You are building UI against this data. |
+| [Intelligence loop](docs/intelligence-loop.md) | You are changing the evidence planner, provenance, freshness or the Decision Delta. |
 | [Intelligence pipeline](docs/intelligence-pipeline.md) | You are changing prompts, parsing or the memory loop. |
 | [ChainGPT integration](docs/chaingpt-integration.md) | You are debugging the provider or going live. |
 | [KULT data model](docs/kult-data-model.md) | You need to know what is real KULT data and what is derived. |
